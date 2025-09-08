@@ -1,23 +1,13 @@
 # -*- coding: utf-8 -*-
-"""
-Government Quasi-Judicial AI System — Zilla Parishad, Chandrapur
-Fixes in this version:
-- Strong contrast: dark-blue masthead (white text), black body text
-- Works even if assets/ images missing
-- Branding panel to upload State Emblem + ZP banner at runtime
-- Mandatory Case+GR & detailed Marathi order with extracted facts
-"""
-
-import io, os, re, datetime, tempfile, base64, pathlib
-from typing import List, Tuple, Dict
+import io, os, re, datetime, base64, pathlib, tempfile
+from typing import Dict, List
 import streamlit as st
-import numpy as np
 from PIL import Image
+import numpy as np
 
-# ───────────────── PAGE / THEME ─────────────────
+# ───────────────── PAGE / THEME (high contrast, always visible) ─────────────────
 st.set_page_config(page_title="Government Quasi-Judicial AI — ZP Chandrapur", layout="wide")
 
-# Strong contrast styles (no white-on-white)
 st.markdown("""
 <style>
 :root{
@@ -69,46 +59,41 @@ html, body { background:#ffffff; color:var(--ink); }
 </style>
 """, unsafe_allow_html=True)
 
-# ───────────────── BRANDING (works even if assets missing) ─────────────────
-ASSETS = pathlib.Path(__file__).parent / "assets"
+# ───────────────── BRANDING (works even if no assets folder) ─────────────────
+def svg_data_url(svg_text: bytes) -> str:
+    return "data:image/svg+xml;base64," + base64.b64encode(svg_text).decode("utf-8")
 
-def _b64_file(path: pathlib.Path) -> str:
-    if path.exists():
-        return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("utf-8")
-    return ""
+PLACE_EMBLEM = svg_data_url(b'''
+<svg xmlns="http://www.w3.org/2000/svg" width="70" height="70">
+  <rect width="100%" height="100%" fill="#0B3A82"/>
+  <text x="50%" y="55%" fill="#ffffff" font-size="12" font-family="Arial" text-anchor="middle">STATE</text>
+</svg>''')
 
-# placeholders (white icons on blue bg) if files not present
-PLACE_EMBLEM = """data:image/svg+xml;base64,{}""".format(base64.b64encode(
-b'''<svg xmlns="http://www.w3.org/2000/svg" width="70" height="70"><rect width="100%" height="100%" fill="#0B3A82"/><text x="50%" y="55%" fill="#ffffff" font-size="12" font-family="Arial" text-anchor="middle">STATE</text></svg>'''
-).decode("utf-8"))
-PLACE_BANNER = """data:image/svg+xml;base64,{}""".format(base64.b64encode(
-b'''<svg xmlns="http://www.w3.org/2000/svg" width="360" height="46"><rect width="100%" height="100%" fill="#ffffff"/><text x="50%" y="60%" fill="#0B3A82" font-size="18" font-family="Arial" text-anchor="middle">Zilla Parishad Chandrapur</text></svg>'''
-).decode("utf-8"))
+PLACE_BANNER = svg_data_url(b'''
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="46">
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="50%" y="60%" fill="#0B3A82" font-size="18" font-family="Arial" text-anchor="middle">
+    Zilla Parishad Chandrapur
+  </text>
+</svg>''')
 
-# load from assets if present, else placeholders
-maha_emblem = _b64_file(ASSETS / "maha_emblem.png") or PLACE_EMBLEM
-zp_banner   = _b64_file(ASSETS / "zp_chandrapur_banner.png") or PLACE_BANNER
-
-# Sidebar: Branding overrides
 with st.sidebar:
     st.markdown("### Branding / Logos")
-    st.caption("Upload logos if you don’t see your official images.")
+    st.caption("Upload the two official images if you want them in the header & watermark.")
     em_up = st.file_uploader("State Emblem (PNG/SVG)", type=["png","svg"], key="emblem")
     bn_up = st.file_uploader("ZP Banner (PNG/SVG)", type=["png","svg"], key="banner")
-    if em_up:
-        mahadata = em_up.read()
-        if em_up.name.lower().endswith(".svg"):
-            maha_emblem = "data:image/svg+xml;base64,"+base64.b64encode(mahadata).decode("utf-8")
-        else:
-            maha_emblem = "data:image/png;base64,"+base64.b64encode(mahadata).decode("utf-8")
-    if bn_up:
-        bnd = bn_up.read()
-        if bn_up.name.lower().endswith(".svg"):
-            zp_banner = "data:image/svg+xml;base64,"+base64.b64encode(bnd).decode("utf-8")
-        else:
-            zp_banner = "data:image/png;base64,"+base64.b64encode(bnd).decode("utf-8")
 
-# Masthead (now always dark-blue with white text)
+def file_to_data_url(file) -> str:
+    if file is None: return ""
+    data = file.read()
+    if file.name.lower().endswith(".svg"):
+        return "data:image/svg+xml;base64," + base64.b64encode(data).decode("utf-8")
+    else:
+        return "data:image/png;base64," + base64.b64encode(data).decode("utf-8")
+
+maha_emblem = file_to_data_url(em_up) or PLACE_EMBLEM
+zp_banner   = file_to_data_url(bn_up) or PLACE_BANNER
+
 st.markdown(f"""
 <div class="mast">
   <div class="mast-left">
@@ -124,12 +109,11 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ───────────────── UTILITIES / EXTRACTION ─────────────────
+# ───────────────── HELPERS ─────────────────
 DEVN = re.compile(r"[\u0900-\u097F]")
 AADHAAR = re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b")
 PAN     = re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b")
 MOBILE  = re.compile(r"\b[6-9]\d{9}\b")
-
 def redact(s:str)->str:
     s = AADHAAR.sub("XXXX XXXX XXXX", s)
     s = PAN.sub("XXXXX9999X", s)
@@ -144,12 +128,14 @@ def read_txt(b: bytes) -> str:
 
 def extract_text_pdf(pdf: bytes) -> str:
     text = ""
+    # Try PyMuPDF
     try:
         import fitz
         doc = fitz.open(stream=pdf, filetype="pdf")
         text = "\n".join([p.get_text("text") for p in doc]).strip()
         doc.close()
     except: pass
+    # pdfminer
     if len(text) < 60:
         try:
             from pdfminer.high_level import extract_text
@@ -160,6 +146,7 @@ def extract_text_pdf(pdf: bytes) -> str:
             except: pass
             if DEVN.search(t2) or len(t2)>len(text): text = t2
         except: pass
+    # pypdf
     if len(text) < 50:
         try:
             from pypdf import PdfReader
@@ -170,6 +157,7 @@ def extract_text_pdf(pdf: bytes) -> str:
     return text.strip()
 
 def easyocr_text(img_bytes: bytes) -> str:
+    # Keep OCR optional: if easyocr/torch not present, skip silently
     try:
         import easyocr
         reader = easyocr.Reader(["mr","hi","en"], gpu=False, verbose=False)
@@ -187,7 +175,7 @@ def extract_any(file) -> str:
     if name.endswith((".png",".jpg",".jpeg",".webp",".tif",".tiff")): return easyocr_text(data)
     return ""
 
-# GR highlighter
+# GR clause highlighter
 _CLAUSE = re.compile("|".join([
     r"(कलम\s*\d+[A-Za-z]?)", r"(धोरण\s*\d+)", r"(अट\s*\d+)",
     r"(Clause\s*\d+)", r"(Section\s*\d+[A-Za-z]?)"
@@ -204,7 +192,7 @@ def highlight_gr(text: str, max_lines=140) -> str:
     if len(text.splitlines())>max_lines: out.append("…")
     return "<br>".join(out)
 
-# Marathi fact parser
+# Marathi fact parser (pulls concrete details)
 MAR_CAND = re.compile(r"(सौ\.|श्री\.?)\s*([अ-ह][^\s,]*)\s+([अ-ह][^,]*)[, ]+\s*रा\.\s*([अ-ह][^,]*)(?:,\s*ता\.\s*([अ-ह][^,]*))?", re.U)
 MAR_HEAR = re.compile(r"(सुनावणी)\s*(दिनांक|दिनाँक|दि\.?)\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4})", re.U)
 MAR_HEAR_TIME = re.compile(r"(सकाळी|सायंकाळी)\s*([०-९0-9]{1,2}(\.[0-9]+)?)\s*(वा|वाजता)", re.U)
@@ -237,7 +225,7 @@ def parse_marathi_case(text: str) -> Dict:
     d["refs"] = list(dict.fromkeys(d["refs"]))[:8]
     return d
 
-# Order builders (Marathi & English)
+# Orders
 def order_marathi(meta: dict, decision: dict, facts: dict, gr_text: str) -> str:
     today = datetime.date.today().strftime("%d/%m/%Y")
     refs = decision.get("refs", []) or facts.get("refs", [])
@@ -327,17 +315,11 @@ with t1:
         officer = st.text_input("Officer", "मुख्य कार्यकारी अधिकारी, जिल्हा परिषद, चंद्रपूर")
         hearing_d = st.text_input("Hearing Date (dd/mm/yyyy)", "13/05/2025")
     with c2:
-        subject_p = st.selectbox("Case Subject (pick)", [
-            "Anganwadi Helper/Worker Selection","Teacher Appointment (ZP School)","Transfers / Service Matters",
-            "Works Contract / Tender","MGNREGA Wage Claim","Procurement Irregularity","Health (PHC/RH) Staffing",
-            "ZP Benefit Eligibility","Other"
-        ], index=0)
-        subject_f = st.text_input("Or type subject (free)", "अंगणवाडी मदतनीस निवडीबाबत निर्णय")
-        subject = subject_f.strip() or subject_p
+        subject_free = st.text_input("Subject (free text)", "अंगणवाडी मदतनीस निवडीबाबत निर्णय")
+        subject = subject_free.strip() or "प्रशासनिक निर्णय"
     with c3:
         red_mode = st.toggle("Sensitive mode (mask Aadhaar/PAN/Mobile)", value=True)
         lang_pref = st.radio("Default Order Language", ["Marathi","English"], index=0, horizontal=True)
-    st.caption("Subject & File No. appear in the order. Sensitive-mode masks numbers in previews.")
 
 with t2:
     st.markdown("<div class='section-title'>Documents — Case & GR (both mandatory)</div>", unsafe_allow_html=True)
@@ -345,11 +327,11 @@ with t2:
     with a:
         st.markdown("**📄 CASE** (PDF/TXT/Image)")
         case_up = st.file_uploader("Upload Case", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"])
-        case_txt = st.text_area("Or paste case text (fallback)", height=140)
+        case_txt_fb = st.text_area("Or paste case text (fallback)", height=160)
     with b:
         st.markdown("**📑 GOVERNMENT GR** (PDF/TXT/Image)")
         gr_up = st.file_uploader("Upload GR", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"])
-        gr_txt = st.text_area("Or paste GR text (fallback)", height=140)
+        gr_txt_fb = st.text_area("Or paste GR text (fallback)", height=160)
     refs_text = st.text_area("References (one per line)",
         "महाराष्ट्र शासन, महिला व बालविकास विभाग शासन निर्णय क्रमांक एबावि-2022/प्र.क्र.94/का-6, दिनांक 02/02/2023\n"
         "मा. आयुक्त, ईबावि, नवी मुंबई यांचे पत्र, दिनांक 31/01/2025\n"
@@ -360,24 +342,31 @@ with t2:
 with t3:
     st.markdown("<div class='section-title'>Analyze (Extract facts & checks)</div>", unsafe_allow_html=True)
     if st.button("Run Analysis", type="primary", use_container_width=True):
-        if not (case_up or case_txt.strip()):
+        if not (case_up or case_txt_fb.strip()):
             st.error("❌ Provide CASE file or paste case text.")
-        elif not (gr_up or gr_txt.strip()):
+        elif not (gr_up or gr_txt_fb.strip()):
             st.error("❌ Provide GR file or paste GR text.")
         else:
-            ctext = (case_txt.strip() or extract_any(case_up) or "").strip()
-            gtext = (gr_txt.strip()   or extract_any(gr_up)   or "").strip()
+            case_text = (case_txt_fb.strip() or extract_any(case_up) or "").strip()
+            gr_text   = (gr_txt_fb.strip()  or extract_any(gr_up)  or "").strip()
+
             with st.expander("CASE Preview"):
-                st.code(red(ctext[:1500]) if red_mode else ctext[:1500] or "—")
+                st.code(red(case_text[:1500]) if red_mode else case_text[:1500] or "—")
             with st.expander("GR Preview"):
-                st.code(red(gtext[:1500]) if red_mode else gtext[:1500] or "—")
-                if gtext:
+                st.code(red(gr_text[:1500]) if red_mode else gr_text[:1500] or "—")
+                if gr_text:
                     st.markdown("**Highlighted clauses/keywords**", unsafe_allow_html=True)
-                    st.markdown(f"<div class='card'>{highlight_gr(gtext)}</div>", unsafe_allow_html=True)
-            facts = parse_marathi_case(ctext)
-            decision = {"case_id": case_id, "subject": subject, "refs":[ln.strip() for ln in refs_text.splitlines() if ln.strip()][:10]}
+                    st.markdown(f"<div class='card'>{highlight_gr(gr_text)}</div>", unsafe_allow_html=True)
+
+            facts = parse_marathi_case(case_text)
+            decision = {"case_id": case_id, "subject": subject,
+                        "refs":[ln.strip() for ln in refs_text.splitlines() if ln.strip()][:10]}
             meta = {"officer": officer, "hearing_date": hearing_d}
-            st.session_state["facts"]=facts; st.session_state["decision"]=decision; st.session_state["meta"]=meta; st.session_state["grtext"]=gtext
+
+            st.session_state["facts"]=facts
+            st.session_state["decision"]=decision
+            st.session_state["meta"]=meta
+            st.session_state["grtext"]=gr_text
             st.success("Analysis complete.")
             with st.expander("Extracted facts"):
                 st.json(facts)
@@ -387,7 +376,11 @@ with t4:
     if "decision" not in st.session_state:
         st.info("Run **Analyze** first.")
     else:
-        decision = st.session_state["decision"]; meta = st.session_state["meta"]; facts = st.session_state["facts"]; gtext = st.session_state["grtext"]
+        decision = st.session_state["decision"]
+        meta     = st.session_state["meta"]
+        facts    = st.session_state["facts"]
+        grtext   = st.session_state["grtext"]
+
         col1,col2,col3 = st.columns([1.2,1.2,1])
         with col1:
             sign_name = st.text_input("Signatory Name", "(Name of CEO)")
@@ -414,7 +407,7 @@ with t4:
   <div class="sig-name">({sign_name})</div><div class="sig-desg">{sign_desg}</div><div>Zilla Parishad, Chandrapur</div>
 </div>"""
 
-        mr = order_marathi(meta, decision, facts, gtext)
+        mr = order_marathi(meta, decision, facts, grtext)
         en = order_english(meta, decision, facts)
         wm_top = f"""<div class="order-block wm-wrap"><div class="wm-bg"><img src="{maha_emblem}"/></div><div class="order-content">""" if add_wm else """<div class="order-block"><div class="order-content">"""
         wm_bot = "</div></div>"
