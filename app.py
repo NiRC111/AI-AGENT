@@ -1,423 +1,291 @@
 # -*- coding: utf-8 -*-
 """
 Government Quasi-Judicial AI System — Zilla Parishad, Chandrapur
-Streamlit (no Docker) version:
-- Professional UI with ZP seal (built-in + upload override)
-- Mandatory Case + GR uploads
-- OCR (Marathi/Hindi/English) using EasyOCR (CPU) — for images & scanned PDFs
-- Robust text extraction for PDFs (PyMuPDF/pdfminer/pypdf), OCR fallback
-- Clause highlighter for GR
-- Quasi-judicial orders (Marathi & English) with signature block + seal watermark
-- Sensitive-mode redaction of Aadhaar/PAN/Mobile in previews
-- System/Security tab
+• Professional Government UI with official masthead (your two images)
+• Mandatory Case + GR inputs (PDF/TXT/Image)
+• Smart field extraction from Marathi case text (candidate, village, hearing, attendees, distance, refs…)
+• Clause highlighter for GR
+• Quasi-judicial orders (Marathi & English) with signature block & watermark
+• Marathi-first; English optional
+• EasyOCR for scanned docs (Marathi/Hindi/English)
 """
 
-import io, os, re, datetime, tempfile, platform, shutil, base64, pathlib
+import io, os, re, datetime, tempfile, base64, pathlib
 from typing import List, Tuple, Dict
 
 import streamlit as st
-import pandas as pd
+import numpy as np
+from PIL import Image
 
-# ────────────────────────── PAGE & THEME ──────────────────────────
-st.set_page_config(page_title="Government Quasi-Judicial AI System — ZP Chandrapur", layout="wide")
+# ---------- Page ----------
+st.set_page_config(page_title="Government Quasi-Judicial AI — ZP Chandrapur", layout="wide")
 
+# ---------- Styles ----------
 st.markdown("""
 <style>
 :root{
-  --gov-blue:#0B3A82; --gov-blue-2:#12408A; --ink:#0b1220; --muted:#4b5563;
-  --line:#e5e7eb; --bg:#ffffff; --ok:#1a7f37; --warn:#b58100; --bad:#b42318;
+  --gov:#0B3A82; --ink:#0b1220; --muted:#475569; --line:#e5e7eb; --wash:#f8fafc;
+  --ok:#1a7f37; --warn:#b58100; --bad:#b42318;
 }
-html, body { background: var(--bg); }
-.block-container { max-width: 1260px !important; padding-top: 0 !important; }
+html, body { background:#ffffff; color:var(--ink); }
+.block-container { max-width: 1180px !important; padding-top: 0 !important; }
 
-/* Header */
-.govbar {
-  position: sticky; top: 0; z-index: 20;
-  background: linear-gradient(180deg, var(--gov-blue), var(--gov-blue-2));
-  color: #fff; padding: 14px 18px; border-bottom: 1px solid rgba(255,255,255,.15);
-}
-.govrow { display:flex; align-items:center; gap:12px; }
-.govtitle { font-weight:800; letter-spacing:.2px; font-size:1.08rem; line-height:1.15; }
-.govsubtitle { opacity:.95; font-weight:500; font-size:.88rem; }
+/* Masthead */
+.mast{display:flex;align-items:center;gap:16px;padding:12px 14px;border-bottom:1px solid var(--line);margin-bottom:12px;}
+.mast-left{display:flex;align-items:center;gap:12px}
+.mast-right{margin-left:auto}
+.mast h1{font-size:1.05rem;margin:0;font-weight:800;color:#0B3A82}
+.mast .sub{font-size:.92rem;color:#0f172a}
 
-/* Sections, cards, badges */
-.section-title {
-  margin: 14px 0 8px 0; padding: 10px 12px; border:1px solid var(--line);
-  border-left: 4px solid var(--gov-blue); border-radius: 8px; background:#f8fafc; font-weight: 700;
-}
-.card { border:1px solid var(--line); border-radius:12px; padding:16px; background:#fff; }
-.badge { display:inline-block; padding:2px 10px; border:1px solid var(--line); border-radius:999px; font-weight:600; font-size:.8rem; background:#f8fafc; }
-.small { color:#6b7280; font-size:.9rem; }
+/* Section */
+.section-title{margin:18px 0 8px 0;padding:10px 12px;border:1px solid var(--line);
+  border-left:4px solid var(--gov);border-radius:8px;background:var(--wash);font-weight:700}
+.card{border:1px solid var(--line);border-radius:12px;padding:16px;background:#fff}
 
 /* Tabs */
-.stTabs [data-baseweb="tab-list"]{ gap:6px; }
-.stTabs [role="tab"]{
-  padding:10px 14px; border-radius:10px 10px 0 0; background:#f3f4f6; border:1px solid var(--line); border-bottom:none;
-  font-weight:600; color:#111827;
-}
-.stTabs [aria-selected="true"]{ background:#ffffff; border-bottom:1px solid #fff; }
+.stTabs [data-baseweb="tab-list"]{gap:6px}
+.stTabs [role="tab"]{padding:10px 14px;border-radius:10px 10px 0 0;background:#f3f4f6;border:1px solid var(--line);border-bottom:none;font-weight:600;color:#111827}
+.stTabs [aria-selected="true"]{background:#ffffff;border-bottom:1px solid #fff}
 
-/* Alerts */
-.alert-ok { border-left:4px solid var(--ok); padding:10px 12px; background:#f6fff7; }
-.alert-warn { border-left:4px solid var(--warn); padding:10px 12px; background:#fffaf0; }
-.alert-bad { border-left:4px solid var(--bad); padding:10px 12px; background:#fff5f5; }
+/* Order block */
+.order-block{border:1px solid var(--line);border-radius:10px;padding:22px;background:#fff}
+.hl{background:#fff3cd;border-bottom:2px solid #facc15}
 
-/* Order block (print-friendly) */
-.order-block{
-  border:1px solid var(--line); border-radius:10px; padding:22px; background:#ffffff;
-  box-shadow: 0 0 0 2px #fff inset;
-}
-.order-block h3{ margin-top:0; }
-
-/* GR clause highlight */
-.hl { background: #fff3cd; border-bottom: 2px solid #facc15; }
-
-/* --- Watermark support --- */
-.wm-wrap { position: relative; }
-.wm-bg {
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  pointer-events: none; z-index: 0;
-}
-.wm-bg img {
-  opacity: .08; width: 42%;
-  min-width: 260px; max-width: 460px;
-  filter: grayscale(100%);
-}
-.order-content { position: relative; z-index: 1; }
+/* Watermark */
+.wm-wrap{position:relative}
+.wm-bg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:0}
+.wm-bg img{opacity:.09;width:46%;min-width:260px;max-width:520px;filter:grayscale(100%)}
+.order-content{position:relative;z-index:1}
 
 /* Signature block */
-.sig-block{
-  margin-top: 24px; padding-top: 12px; border-top: 1px dashed var(--line);
-  line-height: 1.45;
-}
-.sig-rows{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
-.sig-label{ color:#6b7280; font-size:.92rem; }
-.sig-name{ font-weight:700; }
-.sig-desig{ margin-top:-2px; }
+.sig-block{margin-top:24px;padding-top:12px;border-top:1px dashed var(--line);line-height:1.45}
+.sig-rows{display:grid;grid-template-columns:1fr 1fr;gap:10px 24px}
+.sig-label{color:#6b7280;font-size:.92rem}
+.sig-name{font-weight:700}
+.sig-desig{margin-top:-2px}
 
-/* Footer */
-.footer {
-  margin-top: 18px; padding-top: 10px; border-top:1px solid var(--line);
-  font-size: .85rem; color:#6b7280;
-}
-
-/* Print */
-@media print {
-  .govbar, .stButton, .stDownloadButton, .stRadio, .stTextInput, .stFileUploader, .stTabs { display:none !important; }
-  .order-block { border:none; padding:0; }
-  body { background:#fff; }
-}
+/* Alerts */
+.alert-warn{border-left:4px solid var(--warn);padding:10px 12px;background:#fffaf0}
 </style>
 """, unsafe_allow_html=True)
 
-# ────────────────────────── SEAL: default + upload override ──────────────────────────
-def load_default_seal_data_url() -> str:
-    asset_path = pathlib.Path(__file__).parent / "assets" / "seal_placeholder.svg"
-    if asset_path.exists():
-        data = asset_path.read_bytes()
-        return "data:image/svg+xml;base64," + base64.b64encode(data).decode("utf-8")
-    inline_svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36"><circle cx="18" cy="18" r="16" fill="#0B3A82"/></svg>'
-    return "data:image/svg+xml;base64," + base64.b64encode(inline_svg).decode("utf-8")
+# ---------- Load masthead images ----------
+ASSET_DIR = pathlib.Path(__file__).parent / "assets"
+def _b64(path: pathlib.Path) -> str:
+    if not path.exists(): return ""
+    return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("utf-8")
 
-default_seal_env = os.environ.get("ZP_SEAL_DATA_URL", "")
-default_seal = default_seal_env if default_seal_env.startswith("data:image/") else load_default_seal_data_url()
-st.session_state.setdefault("seal_data_url", default_seal)
+maha_emblem = _b64(ASSET_DIR / "maha_emblem.png")
+zp_banner   = _b64(ASSET_DIR / "zp_chandrapur_banner.png")
 
 st.markdown(f"""
-<div class="govbar">
-  <div class="govrow">
-    <img src="{st.session_state['seal_data_url']}" width="36" height="36" style="border-radius:50%;background:#fff"/>
+<div class="mast">
+  <div class="mast-left">
+    <img src="{maha_emblem}" width="70"/>
     <div>
-      <div class="govtitle">Government Quasi-Judicial AI System</div>
-      <div class="govsubtitle">Zilla Parishad, Chandrapur · जिल्हा परिषद, चंद्रपूर · Government of Maharashtra</div>
+      <h1>Government Quasi-Judicial AI System</h1>
+      <div class="sub">Zilla Parishad, Chandrapur · जिल्हा परिषद, चंद्रपूर · Government of Maharashtra</div>
     </div>
+  </div>
+  <div class="mast-right">
+    <img src="{zp_banner}" height="46"/>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Optional seal upload (override)
-seal_upload = st.file_uploader("Upload ZP/Maharashtra Seal (PNG/SVG)", type=["png","svg"], key="seal_upload", label_visibility="collapsed")
-if seal_upload is not None:
-    if seal_upload.type.endswith("svg"):
-        st.session_state["seal_data_url"] = "data:image/svg+xml;base64," + base64.b64encode(seal_upload.read()).decode("utf-8")
-    else:
-        st.session_state["seal_data_url"] = "data:image/png;base64," + base64.b64encode(seal_upload.read()).decode("utf-8")
-
-st.markdown("<div class='section-title'>Case Decision & Order Drafting — Case & GR Mandatory</div>", unsafe_allow_html=True)
-
-# ────────────────────────── LAZY IMPORTS & ENV ──────────────────────────
-def _lazy_imports():
-    mods = {}
+# ---------- Lazy imports ----------
+def _mods():
+    out = {}
     try:
-        import fitz  # PyMuPDF
-        mods["fitz"] = fitz
+        import fitz         # PyMuPDF
+        out["fitz"] = fitz
     except Exception as e:
-        mods["fitz"] = None; mods["fitz_err"] = str(e)
+        out["fitz"] = None; out["fitz_err"] = str(e)
     try:
         from pdfminer.high_level import extract_text as pdfminer_extract_text
-        mods["pdfminer_extract_text"] = pdfminer_extract_text
+        out["pdfminer_extract_text"] = pdfminer_extract_text
     except Exception as e:
-        mods["pdfminer_extract_text"] = None; mods["pdfminer_err"] = str(e)
+        out["pdfminer_extract_text"] = None; out["pdfminer_err"] = str(e)
     try:
         from pypdf import PdfReader
-        mods["PdfReader"] = PdfReader
+        out["PdfReader"] = PdfReader
     except Exception as e:
-        mods["PdfReader"] = None; mods["pypdf_err"] = str(e)
-    # EasyOCR (CPU)
+        out["PdfReader"] = None; out["pypdf_err"] = str(e)
     try:
         import easyocr
-        mods["easyocr"] = easyocr
+        out["easyocr"] = easyocr
     except Exception as e:
-        mods["easyocr"] = None; mods["easyocr_err"] = str(e)
-    try:
-        from PIL import Image
-        mods["PIL_Image"] = Image
-    except Exception as e:
-        mods["PIL_Image"] = None
-    return mods
+        out["easyocr"] = None; out["easyocr_err"] = str(e)
+    return out
 
-OCR_LANGS = ["en","hi","mr"]
-DEVANAGARI_RE = re.compile(r'[\u0900-\u097F]')
-AADHAAR_RE    = re.compile(r'(\b\d{4}\s?\d{4}\s?\d{4}\b)')
-PAN_RE        = re.compile(r'\b([A-Z]{5}\d{4}[A-Z])\b')
-MOBILE_RE     = re.compile(r'\b([6-9]\d{9})\b')
+OCR_LANGS = ["mr","hi","en"]
+DEVN = re.compile(r"[\u0900-\u097F]")  # Devanagari block
+AADHAAR = re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b")
+PAN     = re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b")
+MOBILE  = re.compile(r"\b[6-9]\d{9}\b")
 
-def contains_devanagari(s: str) -> bool: return bool(DEVANAGARI_RE.search(s or ""))
-
-def robust_decode(b: bytes) -> str:
-    for enc in ("utf-8","utf-8-sig","utf-16","utf-16le","utf-16be"):
-        try: return b.decode(enc)
-        except Exception: pass
-    return b.decode("latin-1", errors="ignore")
-
-def redact_sensitive(s: str) -> str:
-    s = AADHAAR_RE.sub("XXXX XXXX XXXX", s)
-    s = PAN_RE.sub("XXXXX9999X", s)
-    s = MOBILE_RE.sub("XXXXXXXXXX", s)
+def red(s:str)->str:
+    s = AADHAAR.sub("XXXX XXXX XXXX", s)
+    s = PAN.sub("XXXXX9999X", s)
+    s = MOBILE.sub("XXXXXXXXXX", s)
     return s
 
-# ────────────────────────── OCR (EasyOCR) ──────────────────────────
-@st.cache_resource(show_spinner=False)
-def get_easyocr_reader():
-    mods = _lazy_imports()
-    if not mods.get("easyocr"):
-        return None, "EasyOCR not available"
+# ---------- Extraction helpers ----------
+def read_txt(b: bytes) -> str:
+    for enc in ("utf-8","utf-8-sig","utf-16","utf-16le","utf-16be"):
+        try: return b.decode(enc)
+        except: pass
+    return b.decode("latin-1","ignore")
+
+def extract_text_with_pypdf(pdf: bytes) -> str:
+    PdfReader = _mods().get("PdfReader")
+    if not PdfReader: return ""
     try:
-        reader = mods["easyocr"].Reader(OCR_LANGS, gpu=False, verbose=False)
-        return reader, "OK"
-    except Exception as e:
-        return None, f"EasyOCR init failed: {e}"
+        reader = PdfReader(io.BytesIO(pdf))
+        return "\n".join([(p.extract_text() or "") for p in reader.pages]).strip()
+    except: return ""
 
-def ocr_image_bytes(img_bytes: bytes) -> Tuple[str, List[str]]:
-    """OCR for image bytes using EasyOCR"""
-    from PIL import Image
-    reader, status = get_easyocr_reader()
-    if reader is None:
-        return "", [status]
-    try:
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        result = reader.readtext(np.array(img), detail=0, paragraph=True)
-        text = "\n".join(result)
-        return text.strip(), ["EasyOCR image OK"]
-    except Exception as e:
-        return "", [f"EasyOCR image fail: {e}"]
-
-# ────────────────────────── EXTRACTION ──────────────────────────
-import numpy as np
-
-def extract_text_with_pypdf(pdf_bytes: bytes) -> Tuple[str, List[str]]:
-    logs: List[str] = []
-    PdfReader = _lazy_imports().get("PdfReader")
-    if not PdfReader:
-        return "", ["pypdf not available"]
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        parts = []
-        for page in reader.pages:
-            try:
-                parts.append(page.extract_text() or "")
-            except Exception as e:
-                logs.append(f"pypdf page error: {e}")
-        return "\n".join(parts).strip(), logs + ["pypdf extracted"]
-    except Exception as e:
-        return "", logs + [f"pypdf failed: {e}"]
-
-def extract_text_from_pdf(pdf_bytes: bytes) -> Tuple[str, List[str]]:
-    logs: List[str] = []
-    mods = _lazy_imports()
+def extract_text_from_pdf(pdf: bytes) -> str:
+    mods = _mods()
     fitz = mods.get("fitz")
     pdfminer_extract_text = mods.get("pdfminer_extract_text")
     text = ""
-    # A) PyMuPDF direct text
+    # A) PyMuPDF
     try:
         if fitz:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            parts = [p.get_text("text") for p in doc]
+            doc = fitz.open(stream=pdf, filetype="pdf")
+            text = "\n".join([p.get_text("text") for p in doc]).strip()
             doc.close()
-            text = "\n".join(parts).strip()
-    except Exception as e:
-        logs.append(f"fitz text failed: {e}")
-
-    # B) PyMuPDF blocks (often better for Indic)
+    except: pass
+    # B) Blocks (often better)
     try:
-        if fitz and (not contains_devanagari(text) or len(text) < 50):
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            blocks_all = []
-            for page in doc:
-                blocks = page.get_text("blocks") or []
-                blocks.sort(key=lambda b: (round(b[1],1), round(b[0],1)))
+        if fitz and (not DEVN.search(text) or len(text)<60):
+            doc = fitz.open(stream=pdf, filetype="pdf")
+            parts=[]
+            for p in doc:
+                blocks = p.get_text("blocks") or []
+                blocks.sort(key=lambda b:(round(b[1],1), round(b[0],1)))
                 for b in blocks:
-                    if len(b) >= 5:
-                        t = (b[4] or "").strip()
-                        if t:
-                            blocks_all.append(t)
+                    if len(b)>=5 and (b[4] or "").strip():
+                        parts.append(b[4].strip())
             doc.close()
-            textB = "\n".join(blocks_all).strip()
-            if len(textB) > len(text) or (contains_devanagari(textB) and not contains_devanagari(text)):
-                text = textB
-    except Exception as e:
-        logs.append(f"fitz blocks failed: {e}")
-
-    # C) pdfminer (secondary)
-    if (not contains_devanagari(text)) and pdfminer_extract_text:
+            tb = "\n".join(parts).strip()
+            if len(tb)>len(text) or (DEVN.search(tb) and not DEVN.search(text)): text = tb
+    except: pass
+    # C) pdfminer
+    if (not DEVN.search(text)) and pdfminer_extract_text:
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(pdf_bytes); pdf_path = tmp.name
-            t2 = pdfminer_extract_text(pdf_path) or ""
-            try: os.unlink(pdf_path)
+            with tempfile.NamedTemporaryFile(delete=False,suffix=".pdf") as tmp:
+                tmp.write(pdf); p=tmp.name
+            t2 = pdfminer_extract_text(p) or ""
+            try: os.unlink(p)
             except: pass
-            if contains_devanagari(t2) or len(t2) > len(text):
-                text = t2
-        except Exception as e:
-            logs.append(f"pdfminer failed: {e}")
+            if DEVN.search(t2) or len(t2)>len(text): text=t2
+        except: pass
+    # D) pypdf
+    if len(text)<50:
+        t3 = extract_text_with_pypdf(pdf)
+        if DEVN.search(t3) or len(t3)>len(text): text=t3
+    return text.strip()
 
-    # D) pypdf fallback
-    if len(text) < 50:
-        t3, lg = extract_text_with_pypdf(pdf_bytes)
-        logs += lg
-        if len(t3) > len(text) or contains_devanagari(t3):
-            text = t3
-
-    # E) OCR of pages (as last resort) — render to image via PyMuPDF → EasyOCR
-    if len(text) < 80 and not contains_devanagari(text):
-        reader, status = get_easyocr_reader()
-        if fitz and reader:
-            try:
-                ocr_buf = []
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                for p in doc:
-                    pix = p.get_pixmap(matrix=fitz.Matrix(2,2), alpha=False)
-                    img = np.frombuffer(pix.tobytes("png"), dtype=np.uint8)
-                    # Open via PIL to RGB array
-                    from PIL import Image
-                    pil_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-                    arr = np.array(pil_img)
-                    result = reader.readtext(arr, detail=0, paragraph=True)
-                    ocr_buf.append("\n".join(result))
-                doc.close()
-                ocr_text = "\n\n".join(ocr_buf).strip()
-                if len(ocr_text) > len(text) or contains_devanagari(ocr_text):
-                    text = ocr_text
-                logs.append("EasyOCR PDF OK")
-            except Exception as e:
-                logs.append(f"EasyOCR PDF fail: {e}")
-        else:
-            logs.append(f"OCR skipped ({'no fitz' if not fitz else 'no EasyOCR'})")
-
-    return text.strip(), logs
-
-def extract_text_from_image(img_bytes: bytes) -> Tuple[str, List[str]]:
-    reader, status = get_easyocr_reader()
-    if reader is None:
-        return "", [status]
+def easy_ocr_image(img_bytes: bytes) -> str:
+    m = _mods()
+    easyocr = m.get("easyocr")
+    if not easyocr: return ""
     try:
-        from PIL import Image
+        reader = easyocr.Reader(OCR_LANGS, gpu=False, verbose=False)
         arr = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-        result = reader.readtext(arr, detail=0, paragraph=True)
-        return "\n".join(result).strip(), ["EasyOCR image OK"]
-    except Exception as e:
-        return "", [f"EasyOCR image fail: {e}"]
+        lines = reader.readtext(arr, detail=0, paragraph=True)
+        return "\n".join(lines).strip()
+    except: return ""
 
-def extract_text_any(uploaded_file) -> Tuple[str, List[str]]:
-    name = (uploaded_file.name or "").lower()
-    data = uploaded_file.read()
-    logs = [f"File: {uploaded_file.name} ({len(data)} bytes)"]
-    try:
-        if name.endswith(".txt"):
-            return robust_decode(data), logs + ["Read .txt (robust)"]
-        if name.endswith(".pdf"):
-            t, more = extract_text_from_pdf(data); return t, logs + more
-        if any(name.endswith(ext) for ext in (".png",".jpg",".jpeg",".webp",".tif",".tiff")):
-            t, more = extract_text_from_image(data); return t, logs + more
-        return "", logs + ["Unsupported file type."]
-    except Exception as e:
-        return "", logs + [f"extract_text_any error: {e}"]
+def extract_any(file) -> str:
+    name = (file.name or "").lower()
+    data = file.read()
+    if name.endswith(".txt"):  return read_txt(data)
+    if name.endswith(".pdf"):  return extract_text_from_pdf(data)
+    if name.endswith((".png",".jpg",".jpeg",".webp",".tif",".tiff")): return easy_ocr_image(data)
+    return ""
 
-# ────────────────────────── SUBJECTS / RULE CHECKS ──────────────────────────
-COMMON_SUBJECTS = [
-    "Anganwadi Helper/Worker Selection",
-    "Teacher Appointment (ZP School)",
-    "Transfers / Service Matters",
-    "Works Contract / Tender",
-    "MGNREGA Wage Claim",
-    "Scholarship / Benefit Eligibility",
-    "Procurement Irregularity",
-    "Health (PHC/Rural Hospital) Staffing",
-    "ZP Benefit Eligibility (Social Welfare)",
-    "Land & Building Permission (ZP purview)",
-    "Other (type below)"
-]
+# ---------- Clause highlight ----------
+_CLAUSE = re.compile("|".join([
+    r"(कलम\s*\d+[A-Za-z]?)", r"(धोरण\s*\d+)", r"(अट\s*\d+)",
+    r"(Clause\s*\d+)", r"(Section\s*\d+[A-Za-z]?)"
+]), flags=re.I)
 
-def infer_key_points(case_txt: str, gr_txt: str, extra_legal: str) -> Dict:
-    checks, risks = [], []
-    if any(k in gr_txt for k in ["स्थानिक","रहिवासी","local resident","residency"]):
-        checks.append("GR mentions local residency requirement.")
-        if "3 km" in case_txt.lower() or "३" in case_txt or "3 कि" in case_txt or "३ कि" in case_txt:
-            risks.append("Selection appears non-local while GR requires local residency.")
-    if "सुनावणी" in case_txt or "hearing" in case_txt.lower():
-        checks.append("Hearing/Natural justice referenced.")
-        if any(k in case_txt.lower() for k in ["no hearing","not heard","सुनावणी न"]):
-            risks.append("Possible violation of natural justice.")
-    if any(k in case_txt for k in ["१२ वी","12th","HSC"]):
-        checks.append("Educational qualification mentioned.")
-    if re.search(r'(धोरण|प्रशासनिक|प्रकरण|कलम|section|clause|¶|\u0964)', gr_txt):
-        checks.append("GR contains clause/section markers.")
-    score = 0.6 + 0.1*min(3, len(checks)) - 0.1*min(3, len(risks))
-    if not case_txt.strip() or not gr_txt.strip():
-        score = min(score, 0.5); risks.append("Text extraction incomplete (paste missing text in fallback).")
-    score = max(0.35, min(0.92, score))
-    return {"checks": checks, "risks": risks, "confidence": round(score, 2)}
-
-# ────────────────────────── GR CLAUSE HIGHLIGHTER ──────────────────────────
-CLAUSE_PATTERNS = [
-    r'(कलम\\s*\\d+[A-Za-z]?)',
-    r'(धोरण\\s*\\d+)',
-    r'(अट\\s*\\d+)',
-    r'(Clause\\s*\\d+)',
-    r'(Section\\s*\\d+[A-Za-z]?)'
-]
-_clause_regex = re.compile("|".join(CLAUSE_PATTERNS), flags=re.IGNORECASE)
-
-def highlight_gr_clauses(text: str, max_lines: int = 120) -> str:
-    if not text.strip():
-        return "<em>No GR text available.</em>"
-    lines = text.splitlines()
-    out = []
-    for ln in lines[:max_lines]:
-        if (_clause_regex.search(ln) or ("स्थानिक" in ln) or ("রहिवासी" in ln) or ("रहिवासी" in ln) or ("resident" in ln.lower())):
-            ln = re.sub(_clause_regex, r'<span class="hl">\\1</span>', ln)
-            out.append(f"<div>• {ln}</div>")
+def highlight_gr(text: str, max_lines=140) -> str:
+    if not text.strip(): return "<em>—</em>"
+    out=[]
+    for ln in text.splitlines()[:max_lines]:
+        if any(k in ln for k in ["स्थानिक","रहिवासी"]) or _CLAUSE.search(ln):
+            ln = _CLAUSE.sub(r"<span class='hl'>\\1</span>", ln)
+            out.append(f"• {ln}")
         else:
-            out.append(f"<div>{ln}</div>")
-    if len(lines) > max_lines:
-        out.append("<div>…</div>")
-    return "\n".join(out)
+            out.append(ln)
+    if len(text.splitlines())>max_lines: out.append("…")
+    return "<br>".join(out)
 
-# ────────────────────────── ORDER DRAFTS ──────────────────────────
-def order_marathi_quasi(meta: dict, decision: dict, refs: list) -> str:
-    ref_lines = "\n\t".join([f"{i+1}.\t{r}" for i, r in enumerate(refs)]) if refs else "—"
+# ---------- Marathi case parsing (pulls concrete facts) ----------
+MAR_CAND = re.compile(r"(सौ\.|श्री\.?)\s*([अ-ह]+[^\s,]*)\s+([अ-ह][^,]*)[, ]+\s*रा\.\s*([अ-ह][^,]*)(?:,\s*ता\.\s*([अ-ह][^,]*))?", re.U)
+MAR_HEAR = re.compile(r"(सुनावणी)\s*(दिनांक|दिनाँक|दि\.?)\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4})", re.U)
+MAR_HEAR_TIME = re.compile(r"(सकाळी|सायंकाळी)\s*([०-९0-9]{1,2}(\.[0-9]+)?)\s*(वा|वाजता)", re.U)
+MAR_DIST = re.compile(r"(\d+|\d+[\.]\d+|[०-९]+)\s*(कि\.?मी\.?|किमी|किलोमीटर)", re.U)
+MAR_REF_LINE = re.compile(r"(शासन निर्णय|पत्र|तक्रार अर्ज|सुनावणी|क्रमांक|दिनांक)", re.U)
+
+def parse_marathi_case(text: str) -> Dict:
+    d = {
+        "complainant_name": "", "complainant_village":"", "complainant_taluka":"",
+        "hearing_date":"", "hearing_time":"", "distance_km":"", "attendees":[],
+        "refs":[]
+    }
+    # candidate/complainant
+    m = MAR_CAND.search(text)
+    if m:
+        d["complainant_name"] = f"{m.group(2)} {m.group(3)}".strip()
+        d["complainant_village"] = (m.group(4) or "").strip()
+        d["complainant_taluka"]  = (m.group(5) or "").strip()
+    # hearing date/time
+    mh = MAR_HEAR.search(text)
+    if mh: d["hearing_date"] = mh.group(3)
+    mht = MAR_HEAR_TIME.search(text)
+    if mht:
+        d["hearing_time"] = f"{mht.group(2)} {mht.group(4)}".replace("वा","वाजता")
+    # distance mention
+    md = MAR_DIST.search(text)
+    if md: d["distance_km"] = md.group(0)
+    # attendees (simple bullets after “उपस्थित होते”)
+    if "उपस्थित होते" in text:
+        block = text.split("उपस्थित होते",1)[-1].split("तक्रार",1)[0]
+        lines = [ln.strip(" \n\t•-") for ln in block.splitlines() if ln.strip()]
+        d["attendees"] = [ln for ln in lines if re.search(r"(श्री|श्रीमती|सौ\.)", ln)]
+    # references
+    for ln in text.splitlines():
+        if MAR_REF_LINE.search(ln):
+            d["refs"].append(ln.strip())
+    # dedupe, shorten refs
+    d["refs"] = list(dict.fromkeys(d["refs"]))[:8]
+    return d
+
+# ---------- Orders ----------
+def order_marathi(meta: dict, decision: dict, facts: dict, gr_text: str) -> str:
     today = datetime.date.today().strftime("%d/%m/%Y")
+    refs = decision.get("refs", []) or facts.get("refs", [])
+    refs_md = "\n\t" + "\n\t".join([f"{i+1}.\t{r}" for i,r in enumerate(refs)]) if refs else "\n\t—"
+    comp = facts.get("complainant_name") or "—"
+    village = facts.get("complainant_village") or "—"
+    taluka  = facts.get("complainant_taluka") or "—"
+    hdate   = facts.get("hearing_date") or meta.get("hearing_date","—")
+    htime   = facts.get("hearing_time") or "—"
+    dist    = facts.get("distance_km") or "—"
+
+    # Find a GR clause reference if present
+    clause_hint = "शासन निर्णय दिनांकातील स्थानिक रहिवासी अटीचा भंग दिसून येतो."
+    if "स्थानिक" in gr_text and "रहिवासी" in gr_text:
+        clause_hint = "शासन निर्णयातील **स्थानिक रहिवासी** अटीचा भंग झाल्याचे नोंदीवरून दिसते."
+
+    attendees = facts.get("attendees", [])
+    att_block = ("\n\t" + "\n\t".join([f"{i+1}.\t{a}" for i,a in enumerate(attendees)]) ) if attendees else "\n\t—"
+
     return f"""📝 **निर्णय-आदेश (अर्धन्यायिक – मराठी मसुदा)**
 
 **कार्यालय :** {meta['officer']}  
@@ -425,27 +293,31 @@ def order_marathi_quasi(meta: dict, decision: dict, refs: list) -> str:
 **विषय :** {decision['subject']}  
 **दिनांक :** {today}
 
-**संदर्भ :**  
-\t{ref_lines}
+**संदर्भ :** {refs_md}
+
+⸻
+
+**प्रकरण :**  
+सदर प्रकरण {taluka} तालुक्यातील **{village}** येथील अंगणवाडी मदतनीस पदावरील निवडीसंबंधी आहे. तक्रारकर्त्या **{comp}** यांनी निवड स्थानिक रहिवासी निकषांचा अवलंब न करता {dist} अंतरावरील उमेदवारास देण्यात आल्याचे मांडले आहे. सदरप्रमाणे सुनावणी **दिनांक {hdate} रोजी {htime}** घेण्यात आली.
+
+**सुनावणीत उपस्थित:**{att_block}
+
+**तपासणी व निष्कर्ष :**  
+• शासन नोंदी व GR परीक्षणावरून {clause_hint}  
+• ग्रामीण/आदिवासी प्रकल्पांत मदतनीस पदासाठी **संबंधित महसुली गावातील स्थानिक रहिवासी महिला** असणे आवश्यक.  
+• उपलब्ध कागदपत्रांनुसार तक्रारकर्त्या पात्रता निकष (शैक्षणिक व स्थानिक) पूर्ण करतात.  
+• त्यामुळे पूर्वनिवड GR विरुद्ध झालेली दिसते.
 
 ⸻
 
 **आदेश :**  
+1) नानकपठार येथील मदतनीस पदाची **पूर्वीची निवड रद्द** करण्यात येते.  
+2) शासन निर्णयातील अटीप्रमाणे **स्थानीय पात्र उमेदवार** (**{comp}**, रा. {village}, ता. {taluka}) यांची निवड व नियुक्ती मान्य करण्यात येते.  
+3) संबंधित प्रकल्प अधिकारी यांनी **७ (सात) दिवसांच्या** आत नियुक्ती आदेश निर्गमित करून अनुपालन अहवाल सादर करावा.  
+4) जर कोणाकडे भूषणीय आक्षेप/अतिरीक्त कागदपत्रे असतील, तर ते **१५ दिवसांच्या** आत या कार्यालयास सादर करावीत.
 
-सदर सुनावणीत सादर कागदपत्रे व शासन निर्णयातील तरतुदींचा विचार करता आढळून आले की –  
-\t• शासन निर्णयातील **स्थानिक रहिवासी** अट बंधनकारक आहे.  
-\t• ग्रामीण/आदिवासी प्रकल्पातील पदांसाठी उमेदवार सदर महसुली गावातील स्थानिक रहिवासी असणे आवश्यक आहे.  
-\t• नोंदीप्रमाणे तक्रारदार पात्रता व स्थानिक निकष पूर्ण करतात.  
-\t• पूर्वनिवड शासन निर्णयाविरोधात झालेली दिसते.
-
-⸻
-
-**निर्णय :**  
-
-म्हणून, अर्धन्यायिक अधिकाराने खालीलप्रमाणे आदेश देण्यात येतो –  
-\t1. संबंधित पदाची **पूर्वीची निवड रद्द** करण्यात येते.  
-\t2. शासन निर्णयातील अटीप्रमाणे **स्थानिक पात्र उमेदवारास** निवड व नियुक्ती मान्य करण्यात येते.  
-\t3. संबंधित प्रकल्प अधिकारी यांनी **७ दिवसांच्या** आत आवश्यक पुढील कार्यवाही करून **नियुक्ती आदेश** निर्गमित करावा व अनुपालन अहवाल सादर करावा.
+**अपील :**  
+वरील आदेशाविरुद्ध असमाधान असल्यास, लागू तरतुदीनुसार **६० दिवसांच्या** आत सक्षम प्राधिकरणाकडे अपील करता येईल.
 
 ⸻
 
@@ -453,298 +325,197 @@ def order_marathi_quasi(meta: dict, decision: dict, refs: list) -> str:
 जिल्हा परिषद, चंद्रपूर
 """
 
-def order_english_quasi(meta: dict, decision: dict, refs: list) -> str:
+def order_english(meta: dict, decision: dict, facts: dict) -> str:
     today = datetime.date.today().strftime("%d/%m/%Y")
-    refs_md = "\n- " + "\n- ".join(refs) if refs else "\n- —"
+    comp   = facts.get("complainant_name") or "Complainant"
+    village= facts.get("complainant_village") or "village"
+    taluka = facts.get("complainant_taluka") or "taluka"
     return f"""📝 **Decision Order (Quasi-Judicial Draft)**
 
-**Office :** {meta['officer']}  
+**Office:** {meta['officer']}  
 **File No.:** {decision['case_id']}  
-**Subject :** {decision['subject']}  
-**Date :** {today}
+**Subject:** {decision['subject']}  
+**Date:** {today}
 
-**References :**{refs_md}
+**Order:**  
+On consideration of the record and the applicable Government Resolution(s), it is found that the **local residency requirement** is mandatory for the post in question. The earlier selection appears contrary to the GR. The complainant **{comp}** of **{village}, {taluka}** satisfies the eligibility and local criteria.
 
----
-
-**Order :**  
-Upon consideration of the record and relevant Government Resolution(s), it is found that:  
-- The **local residency** condition is mandatory.  
-- For rural/tribal projects, the candidate must be a local resident of the revenue village.  
-- The complainant appears eligible and local per record.  
-- The earlier selection is contrary to the GR.
-
-**Decision :**  
+**Directions:**  
 1) The earlier selection is **hereby cancelled**.  
-2) As per the GR conditions, **the eligible local candidate** is approved for selection and appointment.  
-3) The concerned Project Officer shall issue the **appointment order within 7 days** and report compliance.
+2) The concerned Project Officer shall **select and appoint the eligible local candidate ({comp})** and issue the appointment order within **7 days**.  
+3) Compliance report be submitted thereafter.  
+4) Any aggrieved person may file an appeal before the competent authority within **60 days** as per applicable provisions.
 
 (Chief Executive Officer)  
 Zilla Parishad, Chandrapur
 """
 
-def build_signature_block(lang: str, name: str, designation: str, place: str, sign_date: str) -> str:
-    if lang.lower().startswith("mar"):
-        return f"""
+# ---------- UI Tabs ----------
+t1, t2, t3, t4 = st.tabs(["1) Case Intake", "2) Documents", "3) Analyze", "4) Order"])
+
+# Case Intake
+with t1:
+    st.markdown("<div class='section-title'>Case Intake</div>", unsafe_allow_html=True)
+    c1,c2,c3 = st.columns([1.2,1.2,1])
+    with c1:
+        case_id   = st.text_input("File / Case ID", "ZP/CH/2025/0001")
+        officer   = st.text_input("Officer", "मुख्य कार्यकारी अधिकारी, जिल्हा परिषद, चंद्रपूर")
+        hearing_d = st.text_input("Hearing Date (dd/mm/yyyy)", "13/05/2025")
+    with c2:
+        subject_p = st.selectbox("Case Subject (pick)", [
+            "Anganwadi Helper/Worker Selection",
+            "Teacher Appointment (ZP School)",
+            "Transfers / Service Matters",
+            "Works Contract / Tender",
+            "MGNREGA Wage Claim",
+            "Procurement Irregularity",
+            "Health (PHC/RH) Staffing",
+            "ZP Benefit Eligibility",
+            "Other"
+        ], index=0)
+        subject_f = st.text_input("Or type subject (free)", "अंगणवाडी मदतनीस निवडीबाबत निर्णय")
+        subject   = subject_f.strip() or subject_p
+    with c3:
+        red_mode  = st.toggle("Sensitive mode (redact Aadhaar/PAN/Mobile)", value=True)
+        preview_l = st.radio("Default Order Language", ["Marathi","English"], index=0, horizontal=True)
+    st.caption("Subject & File No. appear in the order. Sensitive-mode masks numbers in previews.")
+
+# Documents
+with t2:
+    st.markdown("<div class='section-title'>Documents — Case & GR (both mandatory)</div>", unsafe_allow_html=True)
+    a,b = st.columns(2)
+    with a:
+        st.markdown("**📄 CASE** (PDF/TXT/Image)")
+        case_up = st.file_uploader("Upload Case", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"])
+        case_txt_fallback = st.text_area("Or paste case text (fallback)", height=140)
+    with b:
+        st.markdown("**📑 GOVERNMENT GR** (PDF/TXT/Image)")
+        gr_up   = st.file_uploader("Upload GR", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"])
+        gr_txt_fallback   = st.text_area("Or paste GR text (fallback)", height=140)
+
+    refs_text = st.text_area("References (one per line)", 
+        "महाराष्ट्र शासन, महिला व बालविकास विभाग शासन निर्णय क्रमांक एबावि-2022/प्र.क्र.94/का-6, दिनांक 02/02/2023\n"
+        "मा. आयुक्त, ईबावि, नवी मुंबई यांचे पत्र, दिनांक 31/01/2025\n"
+        "तक्रार अर्ज, दिनांक 28/03/2025\n"
+        f"सुनावणी दिनांक : {hearing_d}"
+    )
+
+# Analyze
+with t3:
+    st.markdown("<div class='section-title'>Analyze (Extract facts & checks)</div>", unsafe_allow_html=True)
+    run = st.button("Run Analysis", type="primary", use_container_width=True)
+    if run:
+        if not (case_up or case_txt_fallback.strip()):
+            st.error("❌ Provide CASE file or pasted case text.")
+        elif not (gr_up or gr_txt_fallback.strip()):
+            st.error("❌ Provide GR file or pasted GR text.")
+        else:
+            # Read texts
+            case_text = (case_txt_fallback.strip() or extract_any(case_up) or "").strip()
+            gr_text   = (gr_txt_fallback.strip()   or extract_any(gr_up)   or "").strip()
+
+            # Previews
+            with st.expander("CASE Preview"):
+                st.code(red(case_text[:1500]) if red_mode else case_text[:1500] or "—")
+            with st.expander("GR Preview"):
+                st.code(red(gr_text[:1500]) if red_mode else gr_text[:1500] or "—")
+                if gr_text:
+                    st.markdown("**Highlighted clauses/keywords**", unsafe_allow_html=True)
+                    st.markdown(f"<div class='card'>{highlight_gr(gr_text)}</div>", unsafe_allow_html=True)
+
+            # Parse facts
+            facts = parse_marathi_case(case_text)
+
+            # Decision skeleton
+            decision = {
+                "case_id": case_id,
+                "subject": subject,
+                "refs": [ln.strip() for ln in refs_text.splitlines() if ln.strip()][:10],
+            }
+            meta = {
+                "officer": officer,
+                "hearing_date": hearing_d,
+            }
+
+            st.session_state["decision"] = decision
+            st.session_state["meta"]     = meta
+            st.session_state["facts"]    = facts
+            st.session_state["grtext"]   = gr_text
+
+            st.success("Analysis complete.")
+            with st.expander("Extracted facts (auto)"):
+                st.json(facts)
+
+# Order
+with t4:
+    st.markdown("<div class='section-title'>Order (Generate • Watermark • Signature)</div>", unsafe_allow_html=True)
+    if "decision" not in st.session_state:
+        st.info("Run **Analyze** first.")
+    else:
+        decision = st.session_state["decision"]
+        meta     = st.session_state["meta"]
+        facts    = st.session_state.get("facts", {})
+        gr_text  = st.session_state.get("grtext","")
+
+        # Controls
+        col1,col2,col3 = st.columns([1.2,1.2,1])
+        with col1:
+            sign_name = st.text_input("Signatory Name", "(Name of CEO)")
+            sign_desg = st.text_input("Designation", "Chief Executive Officer")
+        with col2:
+            sign_place = st.text_input("Place", "Chandrapur")
+            sign_date  = st.text_input("Sign Date (dd/mm/yyyy)", datetime.date.today().strftime("%d/%m/%Y"))
+        with col3:
+            add_wm   = st.toggle("Watermark with State Emblem", value=True)
+            show_sig = st.toggle("Include Signature Block", value=True)
+
+        def sig_block(lang="mr"):
+            if lang=="mr":
+                return f"""
 <div class="sig-block">
   <div class="sig-rows">
-    <div><span class="sig-label">स्थान :</span> {place}</div>
+    <div><span class="sig-label">स्थान :</span> {sign_place}</div>
     <div><span class="sig-label">दिनांक :</span> {sign_date}</div>
   </div>
   <div style="height:36px"></div>
-  <div class="sig-name">({name})</div>
-  <div class="sig-desig">{designation}</div>
+  <div class="sig-name">({sign_name})</div>
+  <div class="sig-desig">{sign_desg}</div>
   <div>जिल्हा परिषद, चंद्रपूर</div>
   <div class="small">[कार्यालयीन शिक्का / Official Seal]</div>
 </div>
 """
-    else:
-        return f"""
+            else:
+                return f"""
 <div class="sig-block">
   <div class="sig-rows">
-    <div><span class="sig-label">Place:</span> {place}</div>
+    <div><span class="sig-label">Place:</span> {sign_place}</div>
     <div><span class="sig-label">Date:</span> {sign_date}</div>
   </div>
   <div style="height:36px"></div>
-  <div class="sig-name">({name})</div>
-  <div class="sig-desig">{designation}</div>
+  <div class="sig-name">({sign_name})</div>
+  <div class="sig-desig">{sign_desg}</div>
   <div>Zilla Parishad, Chandrapur</div>
   <div class="small">[Office Seal / Official Stamp]</div>
 </div>
 """
 
-# ────────────────────────── UI TABS ──────────────────────────
-t1, t2, t3, t4, t5 = st.tabs([
-    "1) Case Intake",
-    "2) Documents — Upload / Paste",
-    "3) Analyze & Decide",
-    "4) Generate Order",
-    "5) System / Security"
-])
-
-# ——— Case Intake
-with t1:
-    st.markdown("<div class='section-title'>Case Intake</div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1.2,1.2,1])
-    with c1:
-        case_id = st.text_input("File / Case ID", "ZP/CH/2025/0001")
-        officer = st.text_input("Officer", "Chief Executive Officer, Zilla Parishad Chandrapur")
-        hearing_date = st.date_input("Hearing Date", datetime.date.today())
-    with c2:
-        preset = st.selectbox("Case Subject (pick)", COMMON_SUBJECTS, index=0)
-        free_subject = st.text_input("Or type subject (free)", "")
-        subject = free_subject.strip() or preset
-        jurisdiction = st.text_input("Jurisdiction", "Zilla Parishad, Chandrapur")
-    with c3:
-        sensitive_mode = st.toggle("Sensitive mode (redact previews)", value=True)
-        lang_default = st.radio("Default Order Language", ["Marathi","English"], index=0, horizontal=True)
-    relief = st.text_input("Relief Requested", "Cancel earlier selection; appoint eligible local candidate")
-    issues = st.text_area("Issues (comma-separated)", "Local residency; GR compliance; Natural justice")
-    st.caption("Note: Subject and Relief appear verbatim in the order draft.")
-    st.session_state["sensitive_mode"] = sensitive_mode
-
-# ——— Documents
-with t2:
-    st.markdown("<div class='section-title'>Documents — Upload or Paste (with Specific Legal Inputs)</div>", unsafe_allow_html=True)
-    st.markdown("<span class='badge'>Mandatory: Case file and Government GR</span>", unsafe_allow_html=True)
-    a1, a2 = st.columns(2)
-    with a1:
-        st.markdown("#### 📄 Case Upload  **(Mandatory)**")
-        case_file = st.file_uploader("Case File (PDF/TXT/Image)", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"])
-        case_text_manual = st.text_area("Optional: paste Case text (fallback if OCR fails)", height=140)
-        case_inputs = st.text_area("Specific legal inputs for Case (sections/points)", height=90)
-    with a2:
-        st.markdown("#### 📑 Government GR Upload  **(Mandatory)**")
-        gr_file = st.file_uploader("Government GR (PDF/TXT/Image)", type=["pdf","txt","png","jpg","jpeg","webp","tif","tiff"])
-        gr_text_manual = st.text_area("Optional: paste GR text (fallback if OCR fails)", height=140)
-        gr_inputs = st.text_area("Specific legal inputs for GR (numbers/dates/clauses)", height=90)
-
-    st.markdown("#### ⚖️ Additional Authorities (Optional)")
-    b1, b2 = st.columns(2)
-    with b1:
-        judgments = st.file_uploader("Previous Judgments (PDF/TXT)", type=["pdf","txt"], accept_multiple_files=True)
-        procedures = st.file_uploader("Relevant Procedures / SOPs (PDF/TXT)", type=["pdf","txt"], accept_multiple_files=True)
-    with b2:
-        sections = st.file_uploader("Legal Sections / Acts (PDF/TXT)", type=["pdf","txt"], accept_multiple_files=True)
-        other_notes = st.text_area("Other legal notes", height=90)
-
-def _read_and_preview(label: str, uploaded_file, pasted: str, limit: int = 1200) -> Tuple[str, List[str]]:
-    logs: List[str] = []
-    if pasted and pasted.strip():
-        txt = pasted.strip()
-        logs.append(f"{label}: manual pasted text used ({len(txt)} chars).")
-    elif uploaded_file is not None:
-        txt, lg = extract_text_any(uploaded_file)
-        logs.extend([f"{label}: "+x for x in lg])
-    else:
-        txt = ""
-        logs.append(f"{label}: file missing.")
-    prev = redact_sensitive(txt[:limit]) if st.session_state.get("sensitive_mode", True) else txt[:limit]
-    if txt.strip():
-        st.markdown(f"**Preview — {label} (first {limit} chars)**")
-        st.code(prev + ("..." if len(txt) > limit else ""), language="markdown")
-        if label == "GR":
-            st.markdown("**GR Clauses (auto-highlighted)**")
-            st.markdown(f"<div class='card'>{highlight_gr_clauses(txt)}</div>", unsafe_allow_html=True)
-    else:
-        st.info(f"No readable text for **{label}**. If scanned, paste text in the fallback box.")
-    return txt, logs
-
-# ——— Analyze & Decide
-with t3:
-    st.markdown("<div class='section-title'>Analyze & Decide</div>", unsafe_allow_html=True)
-    lang_choice = st.radio("Generate draft primarily in", ["Marathi","English","Both"], index=0 if lang_default=="Marathi" else 1, horizontal=True)
-    references_text = st.text_area(
-        "References (one per line): GR No./Date, letters, complaint date, hearing date etc.",
-        "महाराष्ट्र शासन, महिला व बालविकास विभाग शासन निर्णय क्र. एबावि-2022/प्र.क्र.94/का-6, दि. 02/02/2023\n"
-        "मा. आयुक्त, ईबावि, नवी मुंबई यांचे पत्र, दि. 31/01/2025\n"
-        "तक्रार अर्ज, दि. 28/03/2025\n"
-        f"सुनावणी दिनांक : {datetime.date.today().strftime('%d/%m/%Y')}"
-    )
-    run = st.button("Run Analysis & Build Decision", type="primary", use_container_width=True)
-
-    if run:
-        if not (case_file or case_text_manual.strip()):
-            st.error("❌ Upload Case file or paste case text.")
-        elif not (gr_file or gr_text_manual.strip()):
-            st.error("❌ Upload Government GR or paste GR text.")
-        else:
-            warnings: List[str] = []
-            logs_all: List[str] = []
-
-            case_txt, lg1 = _read_and_preview("CASE", case_file, case_text_manual); logs_all += lg1
-            gr_txt,   lg2 = _read_and_preview("GR",   gr_file,   gr_text_manual);   logs_all += lg2
-
-            def read_many(files, tag)->Tuple[str, List[str]]:
-                pieces, lg = [], []
-                if files:
-                    for f in files:
-                        t, _lg = extract_text_any(f)
-                        pieces.append(t); lg += _lg
-                return "\n\n".join(pieces), [f"{tag}: "+x for x in lg]
-
-            judg_txt, lgJ = read_many(judgments, "JUDG"); logs_all += lgJ
-            secs_txt, lgS = read_many(sections, "SECTIONS"); logs_all += lgS
-            proc_txt, lgP = read_many(procedures, "PROCS"); logs_all += lgP
-
-            extra_legal = "\n".join(filter(None, [gr_inputs, case_inputs, other_notes, judg_txt, secs_txt, proc_txt]))
-
-            if not case_txt.strip(): warnings.append("Case text empty (paste missing parts in fallback).")
-            if not gr_txt.strip(): warnings.append("GR text empty (paste missing parts in fallback).")
-
-            findings = infer_key_points(case_txt, gr_txt, extra_legal)
-
-            decision = {
-                "case_id": case_id,
-                "case_type": subject,
-                "subject": (relief or subject),
-                "recommended_outcome": "Approve with conditions (subject to GR compliance and natural justice).",
-                "checks": findings["checks"],
-                "risks": findings["risks"],
-                "confidence": findings["confidence"],
-            }
-            meta = {
-                "officer": officer,
-                "jurisdiction": jurisdiction,
-                "hearing_date": str(hearing_date),
-                "issues": issues,
-            }
-
-            st.markdown("<div class='card'><h3>Decision (Structured)</h3>", unsafe_allow_html=True)
-            st.json(decision)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            if warnings or decision["risks"]:
-                st.markdown("<div class='alert-warn'>", unsafe_allow_html=True)
-                for w in warnings: st.write("⚠️ "+w)
-                for r in decision["risks"]: st.write("⚠️ "+r)
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            st.session_state["decision"] = decision
-            st.session_state["meta"] = meta
-            st.session_state["refs"] = [ln.strip() for ln in (references_text or "").splitlines() if ln.strip()]
-
-# ——— Generate Order
-with t4:
-    st.markdown("<div class='section-title'>Generate Order</div>", unsafe_allow_html=True)
-    if "decision" not in st.session_state:
-        st.info("Run **Analyze & Decide** first.")
-    else:
-        decision = st.session_state["decision"]
-        meta = st.session_state["meta"]
-        refs = st.session_state.get("refs", [])
-
-        # Signature & watermark controls
-        st.markdown("#### Signature & Presentation")
-        colA, colB, colC = st.columns([1.1, 1.1, 1])
-        with colA:
-            sign_name = st.text_input("Signatory Name", value="(Name of CEO)")
-            sign_designation = st.text_input("Designation", value="Chief Executive Officer")
-        with colB:
-            sign_place = st.text_input("Place", value="Chandrapur")
-            sign_date = st.text_input("Sign Date (dd/mm/yyyy)", value=datetime.date.today().strftime("%d/%m/%Y"))
-        with colC:
-            add_watermark = st.toggle("Watermark with ZP Seal", value=True)
-            include_signature = st.toggle("Include Signature Block", value=True)
-
-        default_idx = 0 if (lang_default=="Marathi" or contains_devanagari(decision["subject"])) else 1
-        view_lang = st.radio("Preview Language", ["Marathi","English","Both"], index=default_idx, horizontal=True)
-
-        # Base orders
-        mr = order_marathi_quasi(meta, decision, refs)
-        en = order_english_quasi(meta, decision, refs)
-
-        # Signature blocks
-        mr_sig_html = build_signature_block("marathi", sign_name, sign_designation, sign_place, sign_date) if include_signature else ""
-        en_sig_html = build_signature_block("english", sign_name, sign_designation, sign_place, sign_date) if include_signature else ""
-        mr_md_tail = f"\n\n\n({sign_name})\n{sign_designation}\nजिल्हा परिषद, चंद्रपूर\nस्थान: {sign_place}  दिनांक: {sign_date}\n" if include_signature else ""
-        en_md_tail = f"\n\n\n({sign_name})\n{sign_designation}\nZilla Parishad, Chandrapur\nPlace: {sign_place}  Date: {sign_date}\n" if include_signature else ""
+        # Build orders
+        mr = order_marathi(meta, decision, facts, gr_text)
+        en = order_english(meta, decision, facts)
 
         # Watermark wrapper
-        wm_html_top = f"""<div class="order-block wm-wrap"><div class="wm-bg"><img src="{st.session_state['seal_data_url']}" /></div><div class="order-content">""" if add_watermark \
-                      else """<div class="order-block"><div class="order-content">"""
-        wm_html_bottom = "</div></div>"
+        wm_top = f"""<div class="order-block wm-wrap"><div class="wm-bg"><img src="{maha_emblem}"/></div><div class="order-content">""" if add_wm \
+                 else """<div class="order-block"><div class="order-content">"""
+        wm_bot = "</div></div>"
 
-        # Render & downloads
-        if view_lang in ["Marathi","Both"]:
-            st.markdown("#### 📜 Marathi Order")
-            st.markdown(wm_html_top + mr + mr_sig_html + wm_html_bottom, unsafe_allow_html=True)
-            st.download_button(
-                "Download Order (MR).md",
-                mr + ("\n\n---\n" + mr_md_tail if include_signature else ""),
-                file_name=f"{decision['case_id']}_Order_MR.md",
-                use_container_width=True
-            )
+        # Marathi
+        st.markdown("#### 📜 Marathi Order")
+        st.markdown(wm_top + mr + (sig_block("mr") if show_sig else "") + wm_bot, unsafe_allow_html=True)
+        mr_dl = mr + (f"\n\n({sign_name})\n{sign_desg}\nस्थान: {sign_place}  दिनांक: {sign_date}\n" if show_sig else "")
+        st.download_button("Download (Marathi).md", mr_dl, file_name=f"{decision['case_id']}_Order_MR.md", use_container_width=True)
 
-        if view_lang in ["English","Both"]:
-            st.markdown("#### 📜 English Order")
-            st.markdown(wm_html_top + en + en_sig_html + wm_html_bottom, unsafe_allow_html=True)
-            st.download_button(
-                "Download Order (EN).md",
-                en + ("\n\n---\n" + en_md_tail if include_signature else ""),
-                file_name=f"{decision['case_id']}_Order_EN.md",
-                use_container_width=True
-            )
-
-# ——— System / Security
-with t5:
-    st.markdown("<div class='section-title'>System / Security</div>", unsafe_allow_html=True)
-    mods=_lazy_imports()
-    st.write({
-        "python": platform.python_version(),
-        "platform": platform.platform(),
-        "cwd": os.getcwd(),
-        "Streamlit": st.__version__,
-        "pandas": pd.__version__,
-        "PyMuPDF (fitz)": "OK" if mods.get("fitz") else f"ERROR: {mods.get('fitz_err','')}",
-        "pdfminer.six": "OK" if mods.get("pdfminer_extract_text") else f"ERROR: {mods.get('pdfminer_err','')}",
-        "pypdf": "OK" if mods.get("PdfReader") else f"ERROR: {mods.get('pypdf_err','')}",
-        "EasyOCR": "OK" if mods.get("easyocr") else f"ERROR: {mods.get('easyocr_err','')}",
-    })
-    st.markdown("""
-<div class="footer">
-<strong>Zilla Parishad, Chandrapur — Government of Maharashtra.</strong><br/>
-Drafts are advisory; final orders must be reviewed & signed by the competent authority.  
-Do not share case files beyond authorized officers. All access is subject to audit.
-</div>
-""", unsafe_allow_html=True)
+        # English
+        st.markdown("#### 📜 English Order")
+        st.markdown(wm_top + en + (sig_block("en") if show_sig else "") + wm_bot, unsafe_allow_html=True)
+        en_dl = en + (f"\n\n({sign_name})\n{sign_desg}\nPlace: {sign_place}  Date: {sign_date}\n" if show_sig else "")
+        st.download_button("Download (English).md", en_dl, file_name=f"{decision['case_id']}_Order_EN.md", use_container_width=True)
